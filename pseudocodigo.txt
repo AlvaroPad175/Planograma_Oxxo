@@ -1,0 +1,297 @@
+================================================================================
+  PSEUDOCODIGO — OPTIMIZADOR DE PLANOGRAMAS OXXO
+================================================================================
+
+ARQUITECTURA GENERAL
+--------------------
+  [Frontend React]  <-->  [Backend FastAPI]  <-->  [GRASP Solver]
+       (UI)                    (API)                 (Algoritmo)
+
+
+================================================================================
+1. FLUJO PRINCIPAL DEL USUARIO
+================================================================================
+
+INICIO
+  usuario carga CSV/Excel  -->  POST /api/upload
+    cargar_dataframe(archivo)
+    detectar_formatos_disponibles(df)
+    --> devuelve {file_id, formatos[]}
+
+  usuario selecciona formato (segmento, mueble, planogrupo, tamano, direccion)
+  -->  POST /api/shelves
+    filtrar_por_formato(df, params)
+    extraer_charolas con ancho / alto / posicion
+    calcular max_frentes_factible
+    --> devuelve {charolas[], capacidad_total}
+
+  usuario configura parametros (frentes, iteraciones, alpha, lambda, etc.)
+  -->  POST /api/optimize  -->  devuelve {task_id}
+    lanza hilo: _run_grasp(task_id, params)
+
+  frontend escucha SSE:  GET /api/progress/{task_id}
+    recibe eventos: status | progress | infeasible | error | done
+
+  al recibir "done":  GET /api/result/{task_id}
+    mostrar planograma visual, metricas, tablas, comparacion historica
+    ofrecer descarga CSV / JSON
+FIN
+
+
+================================================================================
+2. CONSTRUCCION DE LA INSTANCIA  (src/data_loader.py)
+================================================================================
+
+build_instance_single(df, formato, min_frentes, max_frentes, max_variedad):
+  filtrar productos del formato seleccionado
+  PARA cada producto:
+    ancho_ocupado = ancho x num_frentes + separador
+    registrar {upc, ancho, alto, demanda, ganancia, rotacion, promo,
+               hist_charola, hist_pos}
+  construir lista de Shelf(charola, ancho, alto, x_abs, y, visibilidad)
+  --> retorna (productos[], charolas[], no_colocados[], aviso)
+
+
+================================================================================
+3. ALGORITMO GRASP  (src/grasp_solver.py)
+================================================================================
+
+GRASPPlanograma.run(max_iter, local_rounds):
+  mejor_sol   = None
+  mejor_score = -infinito
+
+  REPETIR max_iter veces:
+    sol   = construir()           -- fase constructiva aleatoria
+    sol   = busqueda_local(sol)   -- mejora local
+    score = objetivo(sol)
+
+    SI factible(sol) Y score > mejor_score:
+      mejor_sol   = sol
+      mejor_score = score
+
+    reportar_progreso(iter, score, mejor_score)  -- via SSE al frontend
+
+  SI mejor_sol == None:
+    lanzar error "No se encontro solucion factible"
+
+  retorna (mejor_sol, mejor_score)
+
+--------------------------------------------------------------------------------
+3a. FASE CONSTRUCTIVA  (GRASPPlanograma.construct)
+--------------------------------------------------------------------------------
+
+construir():
+  sol = { charola: [] para cada charola }
+
+  ordenar productos por prioridad:
+    1. tier_altura DESC  (productos mas restrictivos primero)
+       tier 0 = solo cabe en charolas bajas
+       tier 1 = no cabe en el nivel mas restrictivo
+       tier 2 = cabe en cualquier charola
+    2. ancho_ocupado DESC  (principio FFD: anchos primero)
+    3. charola_historica, posicion_historica  (preservar orden original)
+
+  PARA cada producto (en orden de prioridad):
+
+    SI charola_historica tiene espacio:
+      asignar producto alli          -- determinístico, preserva historico
+      CONTINUAR
+
+    SINO:
+      candidatos = []
+      PARA cada charola con espacio disponible:
+        score_inc = score_incremental(producto, charola)
+        agregar (charola, score_inc) a candidatos
+
+      SI candidatos == vacio:
+        lanzar error "Sin charola factible para producto"
+
+      g_max = max(scores de candidatos)
+      g_min = min(scores de candidatos)
+      umbral = g_max - alpha x (g_max - g_min)
+      RCL    = candidatos donde score >= umbral   -- Lista Restringida de Candidatos
+
+      elegir al azar de RCL                       -- aleatorización controlada
+      asignar producto a charola elegida
+
+  retorna sol
+
+--------------------------------------------------------------------------------
+3b. BUSQUEDA LOCAL  (GRASPPlanograma.local_search)
+--------------------------------------------------------------------------------
+
+busqueda_local(sol, max_rondas, sample_moves):
+  mejor       = copia(sol)
+  mejor_score = objetivo(mejor)
+
+  REPETIR max_rondas veces:
+    mejor_vecino  = None
+    mejor_nbr_sc  = mejor_score
+
+    PARA sample_moves intentos:
+      elegir movimiento al azar entre:
+
+        swap     --> intercambiar dos productos entre sus charolas
+        relocate --> mover un producto a una charola y posicion aleatoria
+        restore  --> regresar un producto desplazado a su charola historica
+        reorder  --> reordenar productos de una charola por posicion historica
+
+      generar sol_vecina aplicando el movimiento
+      SI factible(sol_vecina) Y objetivo(sol_vecina) > mejor_nbr_sc:
+        mejor_nbr_sc = objetivo(sol_vecina)
+        mejor_vecino = sol_vecina
+
+    SI mejor_vecino != None:
+      mejor       = mejor_vecino
+      mejor_score = mejor_nbr_sc
+    SINO:
+      TERMINAR  -- optimo local alcanzado
+
+  retorna mejor
+
+--------------------------------------------------------------------------------
+3c. FUNCION OBJETIVO  (GRASPPlanograma.objective)
+--------------------------------------------------------------------------------
+
+objetivo(sol):
+  score = 0
+
+  PARA cada producto p asignado a (charola c, posicion pos):
+
+    -- Valor comercial ponderado por visibilidad de la charola
+    vx     = demanda x ganancia x rotacion x estacional x (1 + promo)
+    score += beta_visibilidad x vx x visibilidad(c)
+
+    -- Fidelidad al planograma historico
+    dist_charola = |c - charola_historica(p)|
+    dist_pos     = |pos - posicion_historica(p)|
+
+    SI dist_charola == 0:
+      score += lambda x 2.0                        -- premio: misma charola
+      score -= lambda x 0.25 x dist_pos            -- penalizacion leve por posicion
+    SINO:
+      score -= lambda x (dist_charola + 0.25 x dist_pos)  -- penalizacion por cambio
+
+    -- Penalizacion por mala asignacion de altura
+    score -= lambda x penalizacion_tamaño(p, c)
+
+  retorna score
+
+penalizacion_tamaño(producto, charola):
+  SI producto.alto es None O charola.clearance >= alto_maximo_dataset:
+    retorna 0
+  height_ratio = producto.alto / alto_maximo
+  exceso       = max(0, (producto.alto - charola.clearance) / alto_maximo)
+  bonus_ajuste = height_ratio x max(0, (charola.clearance - producto.alto) / alto_maximo)
+  retorna exceso - 0.3 x bonus_ajuste
+
+--------------------------------------------------------------------------------
+3d. SCORE INCREMENTAL  (GRASPPlanograma.incremental_score)
+--------------------------------------------------------------------------------
+
+score_incremental(producto p, charola c, posicion pos):
+  -- Version simplificada del objetivo para evaluar rapido durante construccion
+  vx = demanda x ganancia x rotacion x estacional x (1 + promo)
+  s  = beta_visibilidad x vx x visibilidad(c)
+  aplicar misma logica de fidelidad historica y penalizacion de altura
+  retorna s
+
+
+================================================================================
+4. DECODIFICACION Y SALIDA  (src/grasp_solver.py + src/export.py)
+================================================================================
+
+decode(sol):
+  filas = []
+  PARA cada charola (en orden):
+    cursor = 0.0
+    PARA cada producto en la charola (en orden):
+      w = ancho_total del producto
+      SI es el ultimo producto de la charola:
+        sep_aplicado = 0
+      SINO:
+        sep_aplicado = separador del producto
+
+      SI direccion == "ID":   -- izquierda a derecha
+        x_local = cursor
+      SINO:                   -- derecha a izquierda
+        x_local = ancho_charola - cursor - w
+
+      x_abs = x_base_charola + x_local
+
+      registrar fila {CHAROLA, UBICACION, UPC, NAME,
+                      X_LOCAL, X_ABS, ANCHO_TOTAL, SEP_APLICADO,
+                      ANCHO_NETO, ALTO, NUM_FRENTES,
+                      HIST_CHAROLA, HIST_UBICACION_BANDEJA, ...}
+
+      cursor += w + sep_aplicado
+
+  retorna DataFrame ordenado por [CHAROLA, UBICACION_BANDEJA]
+
+build_diagnostics(output_df, charolas):
+  PARA cada charola:
+    n_productos  = conteo de productos asignados
+    ancho_usado  = suma de ANCHO_NETO de los productos
+    capacidad    = ancho de la charola
+    holgura      = capacidad - ancho_usado
+    es_factible  = (ancho_usado <= capacidad)
+  retorna DataFrame de diagnostico por charola
+
+
+================================================================================
+5. VERIFICACION DE FACTIBILIDAD  (backend/main.py)
+================================================================================
+
+antes de lanzar GRASP:
+  total_ancho = suma(ancho_ocupado de todos los productos)
+  total_cap   = suma(ancho de todas las charolas)
+
+  SI total_ancho > total_cap:
+    calcular max_frentes_sugerido  -- busqueda binaria de 10 a 1
+    enviar evento SSE tipo "infeasible" con detalle del deficit
+    terminar tarea sin ejecutar GRASP
+
+  SINO:
+    ejecutar GRASP normalmente
+
+
+================================================================================
+6. STREAMING DE PROGRESO  (SSE — Server-Sent Events)
+================================================================================
+
+GRASP worker (hilo separado):
+  push("status",   "Construyendo instancia...")
+  push("status",   "Ejecutando GRASP (N iteraciones)...")
+  -- en cada iteracion:
+  push("progress", {it, total, score, best})
+  push("status",   "Procesando resultados...")
+  push("done",     {result completo})
+
+Frontend (EventSource):
+  PARA cada evento recibido:
+    "status"    --> mostrar texto en barra de progreso (5%)
+    "progress"  --> actualizar barra (it/total x 100%)
+    "infeasible"--> mostrar alerta con sugerencia de parametros
+    "error"     --> mostrar mensaje de error
+    "done"      --> guardar resultado, renderizar planograma
+
+
+================================================================================
+7. CAPAS DEL SISTEMA
+================================================================================
+
+  Capa          Archivo(s)                  Responsabilidad
+  ----------    --------------------------  ----------------------------------
+  Frontend      frontend/src/               UI React: panel de control,
+                                            visualizacion SVG, tablas, SSE
+  API           backend/main.py             Endpoints REST + SSE,
+                                            manejo de tareas en memoria
+  Datos         src/data_loader.py          Parseo CSV/Excel,
+                                            construccion de instancia
+  Algoritmo     src/grasp_solver.py         GRASP: construccion RCL
+                                            + busqueda local
+  Modelos       src/models.py               Dataclasses: Product, Shelf, Solution
+  Exportacion   src/export.py               CSV de planograma y diagnostico
+  Utilidades    src/utils.py                Funciones auxiliares (fmt_tag, etc.)
+
+================================================================================

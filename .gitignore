@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Outputs generados
+outputs/
+*.pdf
+salida_grasp_*.csv
+ejemplo_planograma\ (1).csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / Claude
+.claude/
+*.local.json

@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-100 text-gray-900 antialiased;
+  }
+  * {
+    box-sizing: border-box;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-xl shadow-sm border border-gray-200;
+  }
+  .btn-primary {
+    @apply bg-oxxo-red hover:bg-red-700 text-white font-semibold
+           py-2.5 px-4 rounded-lg transition-colors duration-150
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-secondary {
+    @apply bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium
+           py-2 px-3 rounded-lg transition-colors duration-150 text-sm;
+  }
+  .input-field {
+    @apply w-full border border-gray-300 rounded-lg px-3 py-2
+           text-sm focus:outline-none focus:ring-2 focus:ring-oxxo-red/40
+           focus:border-oxxo-red bg-white;
+  }
+  .label {
+    @apply block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1;
+  }
+  .section-title {
+    @apply text-xs font-bold text-gray-400 uppercase tracking-widest mb-2 mt-4;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f1f1f1; }
+::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+
+/* SSE progress animation */
+@keyframes pulse-bar {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.progress-pulse { animation: pulse-bar 1.2s ease-in-out infinite; }
